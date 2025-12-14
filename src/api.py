@@ -1,52 +1,58 @@
-# src/api.py
+import os
+from pathlib import Path
 import requests
 import pandas as pd
+from dotenv import load_dotenv
 
-BASE_URL = "http://openapi.foodsafetykorea.go.kr/api"
-API_KEY = "sample"  # 지금은 샘플키 고정
+BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR / ".env", override=True)
 
-def fetch_food_data(service_id: str, start_idx: int = 1, end_idx: int = 100, data_type: str = "json"):
+BASE_URL = "https://openapi.foodsafetykorea.go.kr/api"
+API_KEY = (os.getenv("FOOD_API_KEY", "") or "").strip().replace("\ufeff", "")
+
+def _request_json(url: str, timeout: int = 30):
+    r = requests.get(url, timeout=timeout)
+    text = (r.text or "").strip()
+    ctype = (r.headers.get("content-type") or "").lower()
+    return r.status_code, ctype, text, r
+
+def fetch_food_data(service_id: str, start_idx: int = 1, end_idx: int = 100, data_type: str = "json", use_sample_fallback: bool = True):
     """
     returns: (df, total_count)
     """
-    url = f"{BASE_URL}/{API_KEY}/{service_id}/{data_type}/{start_idx}/{end_idx}"
-    r = requests.get(url, timeout=30)
+    # 1) 내 키로 먼저 시도
+    if API_KEY:
+        url = f"{BASE_URL}/{API_KEY}/{service_id}/{data_type}/{start_idx}/{end_idx}"
+        status, ctype, text, r = _request_json(url)
 
-    text = r.text if r.text is not None else ""
-    ctype = (r.headers.get("content-type") or "").lower()
+        # 정상 JSON이면 파싱
+        if status == 200 and text.startswith("{"):
+            data = r.json()
+            if service_id in data and "row" in data[service_id]:
+                body = data[service_id]
+                df = pd.DataFrame(body.get("row", []))
+                total = int(body.get("total_count", 0) or 0)
+                return df, total
 
-    # 1) HTTP 체크
-    if r.status_code != 200:
-        raise RuntimeError(f"[HTTP {r.status_code}] {url}\nhead={text[:300]}")
+        # 인증키 HTML alert면 fallback로 넘김
+        if (not use_sample_fallback):
+            raise RuntimeError(f"API 실패(URL={url})\nstatus={status}\nctype={ctype}\nhead={text[:300]}")
 
-    # 2) JSON 여부 체크(서버가 HTML 줄 때 차단)
-    # - 공백 제거
-    stripped = text.lstrip()
-    if not stripped.startswith("{"):
+    # 2) sample로 재시도 (C003처럼 내 키가 막힐 때도 파이프라인 진행 가능)
+    url2 = f"{BASE_URL}/sample/{service_id}/{data_type}/{start_idx}/{end_idx}"
+    status2, ctype2, text2, r2 = _request_json(url2)
+
+    if status2 != 200 or (not text2.startswith("{")):
         raise RuntimeError(
-            "JSON이 아닌 응답입니다.\n"
-            f"url={url}\ncontent-type={ctype}\nhead={stripped[:300]}"
+            "API가 JSON이 아닌 응답을 줬습니다.\n"
+            f"URL={url2}\nstatus={status2}\ncontent-type={ctype2}\nhead={text2[:300]}"
         )
 
-    # 3) 여기서도 json 파싱 실패할 수 있으니 try로 감싸서 원문을 보여줌
-    try:
-        data = r.json()
-    except Exception as e:
-        raise RuntimeError(
-            "JSON 파싱 실패(응답이 깨졌거나 중간에 잘렸을 수 있음)\n"
-            f"url={url}\ncontent-type={ctype}\nhead={stripped[:300]}"
-        ) from e
+    data2 = r2.json()
+    if service_id not in data2:
+        raise RuntimeError(f"응답에 {service_id} 키가 없습니다. keys={list(data2.keys())[:10]}")
 
-    if service_id not in data:
-        raise RuntimeError(f"응답 JSON에 '{service_id}' 키가 없습니다. keys={list(data.keys())}")
-
-    body = data[service_id]
-
-    # API 결과 코드 확인
-    result = body.get("RESULT", {})
-    if result and result.get("CODE") not in (None, "INFO-000"):
-        raise RuntimeError(f"API 오류: {result}")
-
-    df = pd.DataFrame(body.get("row", []))
-    total = int(body.get("total_count", 0) or 0)
-    return df, total
+    body2 = data2[service_id]
+    df2 = pd.DataFrame(body2.get("row", []))
+    total2 = int(body2.get("total_count", 0) or 0)
+    return df2, total2
