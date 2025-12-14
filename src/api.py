@@ -17,28 +17,22 @@ def _request_json(url: str, timeout: int = 30):
     return r.status_code, ctype, text, r
 
 def fetch_food_data(service_id: str, start_idx: int = 1, end_idx: int = 100, data_type: str = "json", use_sample_fallback: bool = True):
-    """
-    returns: (df, total_count)
-    """
-    # 1) 내 키로 먼저 시도
     if API_KEY:
         url = f"{BASE_URL}/{API_KEY}/{service_id}/{data_type}/{start_idx}/{end_idx}"
         status, ctype, text, r = _request_json(url)
 
-        # 정상 JSON이면 파싱
         if status == 200 and text.startswith("{"):
             data = r.json()
             if service_id in data and "row" in data[service_id]:
                 body = data[service_id]
                 df = pd.DataFrame(body.get("row", []))
                 total = int(body.get("total_count", 0) or 0)
+                print("✅ REAL API USED:", url)
                 return df, total
 
-        # 인증키 HTML alert면 fallback로 넘김
         if (not use_sample_fallback):
             raise RuntimeError(f"API 실패(URL={url})\nstatus={status}\nctype={ctype}\nhead={text[:300]}")
 
-    # 2) sample로 재시도 (C003처럼 내 키가 막힐 때도 파이프라인 진행 가능)
     url2 = f"{BASE_URL}/sample/{service_id}/{data_type}/{start_idx}/{end_idx}"
     status2, ctype2, text2, r2 = _request_json(url2)
 
@@ -55,4 +49,5 @@ def fetch_food_data(service_id: str, start_idx: int = 1, end_idx: int = 100, dat
     body2 = data2[service_id]
     df2 = pd.DataFrame(body2.get("row", []))
     total2 = int(body2.get("total_count", 0) or 0)
+    print("⚠️ SAMPLE API USED:", url2)
     return df2, total2
